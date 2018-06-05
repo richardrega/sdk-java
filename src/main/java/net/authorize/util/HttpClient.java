@@ -6,22 +6,38 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.security.KeyStore;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.Credentials;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.CredentialsProvider;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.conn.params.ConnRoutePNames;
 import org.apache.http.conn.socket.LayeredConnectionSocketFactory;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.BasicCredentialsProvider;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.client.LaxRedirectStrategy;
+import org.apache.http.impl.conn.DefaultProxyRoutePlanner;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.impl.client.LaxRedirectStrategy;
 import org.apache.http.params.CoreProtocolPNames;
@@ -49,6 +65,9 @@ public class HttpClient {
 	static boolean UseProxy = Environment.getBooleanProperty(Constants.HTTPS_USE_PROXY);
 	static String ProxyHost = Environment.getProperty(Constants.HTTPS_PROXY_HOST);
 	static int ProxyPort = Environment.getIntProperty(Constants.HTTPS_PROXY_PORT);
+	static String proxyUsername = Environment.getProperty(Constants.HTTPS_PROXY_USERNAME);
+	static String proxyPassword = Environment.getProperty(Constants.HTTPS_PROXY_PASSWORD);
+
 	static int httpConnectionTimeout = Environment.getIntProperty(Constants.HTTP_CONNECTION_TIME_OUT);
 	static int httpReadTimeout = Environment.getIntProperty(Constants.HTTP_READ_TIME_OUT);
 			
@@ -177,9 +196,10 @@ public class HttpClient {
 
 		if(environment != null && transaction != null) {
 			try {
+				CloseableHttpClient httpClient = getHttpsClient();
 				//DefaultHttpClient httpClient = new DefaultHttpClient();
-				org.apache.http.client.HttpClient httpClient = getHttpsClient();
-				setProxyIfRequested(httpClient);
+				//org.apache.http.client.HttpClient httpClient = getHttpsClient();
+				//setProxyIfRequested(httpClient);
 
 				// create the HTTP POST object
 				HttpPost httpPost = createHttpPost(environment, transaction);
@@ -267,9 +287,10 @@ public class HttpClient {
 
 		if(environment != null && transaction != null) {
 			try {
+				CloseableHttpClient httpClient = getHttpsClient();
 				//DefaultHttpClient httpClient = new DefaultHttpClient();
-				org.apache.http.client.HttpClient httpClient = getHttpsClient();
-				setProxyIfRequested(httpClient);
+				//org.apache.http.client.HttpClient httpClient = getHttpsClient();
+				//setProxyIfRequested(httpClient);
 
 				// create the HTTP POST object
 				HttpPost httpPost = createHttpPost(environment, transaction);
@@ -331,19 +352,95 @@ public class HttpClient {
 		return response;
 	}
 
+//	/**
+//	 * if proxy use is requested, set http-client appropriately
+//	 * @param httpClient the client to add proxy values to
+//	 */
+//	public static void setProxyIfRequested(org.apache.http.client.HttpClient httpClient) {
+//		if ( UseProxy)
+//		{
+//			if ( !proxySet) {
+//				LogHelper.info(logger, "Setting up proxy to URL: '%s://%s:%d'", Constants.PROXY_PROTOCOL, ProxyHost, ProxyPort);
+//				proxySet = true;
+//			}
+//			HttpHost proxyHttpHost = new HttpHost(ProxyHost, ProxyPort, Constants.PROXY_PROTOCOL);
+//			httpClient.getParams().setParameter( ConnRoutePNames.DEFAULT_PROXY, proxyHttpHost);
+//		}
+//	}
+
 	/**
-	 * if proxy use is requested, set http-client appropriately 
-	 * @param httpClient the client to add proxy values to 
+	 * @return returns an SSL context with TLSv1.2 protocol instance to be used in the call
 	 */
-	public static void setProxyIfRequested(org.apache.http.client.HttpClient httpClient) {
-		if ( UseProxy)
-		{
-			if ( !proxySet) {
-				LogHelper.info(logger, "Setting up proxy to URL: '%s://%s:%d'", Constants.PROXY_PROTOCOL, ProxyHost, ProxyPort);
+	private static SSLContext getSSLContext() {
+		try {
+			final SSLContext sc = SSLContext.getInstance("TLSv1.2");
+			final TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+			trustManagerFactory.init((KeyStore) null);
+			sc.init(null, trustManagerFactory.getTrustManagers(), new java.security.SecureRandom());
+			return sc;
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+			return null;
+		}
+	}
+
+	/**
+	 * Returns a HTTPClient instance which enforce TLSv1.2 protocol for all the calls
+	 * @return CloseableHttpClient instance
+	 * @throws Exception
+	 */
+	static CloseableHttpClient getHttpsClient() throws Exception {
+		SSLContext sslcontext = getSSLContext();
+		try {
+			LayeredConnectionSocketFactory sslSocketFactory = new org.apache.http.conn.ssl.SSLConnectionSocketFactory(sslcontext, SSLConnectionSocketFactory.STRICT_HOSTNAME_VERIFIER);
+			RequestConfig requestConfig = RequestConfig.custom().setConnectTimeout(httpConnectionTimeout).build();
+
+			CloseableHttpClient httpClient;
+
+			if ( UseProxy && ProxyHost != null) {
+
+				HttpClientBuilder hcBuilder;
+				if (proxyUsername != null && proxyPassword != null) {
+					LogHelper.info(logger, "Setting up proxy to URL with Authentication: '%s://%s@%s:%d'", Constants.PROXY_PROTOCOL, proxyUsername, ProxyHost, ProxyPort);
+					CredentialsProvider credsProvider = new BasicCredentialsProvider();
+					AuthScope proxyScope = new AuthScope(ProxyHost, ProxyPort);
+					Credentials proxyCreds = new UsernamePasswordCredentials(proxyUsername, proxyPassword);
+					credsProvider.setCredentials(proxyScope, proxyCreds);
+					hcBuilder = HttpClients.custom()
+								.setSSLSocketFactory(sslSocketFactory)
+								.setDefaultRequestConfig(requestConfig)
+								.setRedirectStrategy(new LaxRedirectStrategy())
+								.setDefaultCredentialsProvider(credsProvider);
+				}
+				else {
+					LogHelper.info(logger, "Setting up proxy to URL: '%s://%s:%d'", Constants.PROXY_PROTOCOL, ProxyHost, ProxyPort);
+					hcBuilder = HttpClients.custom()
+								.setSSLSocketFactory(sslSocketFactory)
+								.setDefaultRequestConfig(requestConfig)
+								.setRedirectStrategy(new LaxRedirectStrategy());
+				}
+
+				HttpHost httpProxy = new HttpHost(ProxyHost, ProxyPort, Constants.PROXY_PROTOCOL);
+	            hcBuilder.setProxy(httpProxy);
+
+	            httpClient = hcBuilder.build();
+
 				proxySet = true;
 			}
-			HttpHost proxyHttpHost = new HttpHost(ProxyHost, ProxyPort, Constants.PROXY_PROTOCOL);
-			httpClient.getParams().setParameter( ConnRoutePNames.DEFAULT_PROXY, proxyHttpHost);
+			else {
+				LogHelper.warn(logger, "Defaulting to non-proxy environment");
+
+				httpClient =  HttpClients.custom()
+						.setSSLSocketFactory(sslSocketFactory)
+						.setDefaultRequestConfig(requestConfig)
+						.setRedirectStrategy(new LaxRedirectStrategy())
+						.build();
+			}
+
+			return httpClient;
+		} catch (Exception e) {
+			return null;
 		}
 	}
 }
